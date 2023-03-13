@@ -93,6 +93,33 @@ envoy_cc_test(
 )
 
 envoy_cc_test(
+    name = "fcds_api_test",
+    srcs = ["fcds_api_test.cc"],
+    data = [
+        "//test/config/integration/certs",
+    ],
+    deps = [
+        "//test/mocks/config:config_mocks",
+        "//test/mocks/init:init_mocks",
+        "//test/mocks/protobuf:protobuf_mocks",
+        "//test/mocks/upstream:upstream_mocks",
+        "//test/mocks/server:listener_manager_mocks",
+        "//test/mocks/server:factory_context_mocks",
+        "//test/test_common:environment_lib",
+        "//test/test_common:utility_lib",
+        "//source/extensions/listener_managers/listener_manager:filter_chain_manager_lib",
+        "//source/extensions/listener_managers/listener_manager:listener_manager_lib",
+	"//source/common/config:api_version_lib",
+        "//source/common/common:callback_impl_lib",
+        "//source/common/config:subscription_base_interface",
+        "//source/common/protobuf:utility_lib",
+        "@envoy_api//envoy/config/core/v3:pkg_cc_proto",
+        "@envoy_api//envoy/config/listener/v3:pkg_cc_proto",
+        "@envoy_api//envoy/service/discovery/v3:pkg_cc_proto",
+    ],
+)
+
+envoy_cc_test(
     name = "filter_chain_manager_impl_test",
     srcs = ["filter_chain_manager_impl_test.cc"],
     data = ["//test/extensions/transport_sockets/tls/test_data:certs"],

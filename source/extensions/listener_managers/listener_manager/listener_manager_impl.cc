@@ -276,6 +276,11 @@ DrainingFilterChainsManager::DrainingFilterChainsManager(ListenerImplPtr&& drain
     : draining_listener_(std::move(draining_listener)),
       workers_pending_removal_(workers_pending_removal) {}
 
+DrainingFilterChainsManager::DrainingFilterChainsManager(ListenerImpl& draining_listener,
+                                                         uint64_t workers_pending_removal)
+    : draining_listener_(&draining_listener),
+      workers_pending_removal_(workers_pending_removal) {}
+
 ListenerManagerImpl::ListenerManagerImpl(Instance& server,
                                          std::unique_ptr<ListenerComponentFactory>&& factory,
                                          WorkerFactory& worker_factory,
@@ -744,6 +749,69 @@ void ListenerManagerImpl::inPlaceFilterChainUpdate(ListenerImpl& listener) {
   drainFilterChains(std::move(previous_listener), **existing_active_listener);
 
   warming_listeners_.erase(existing_warming_listener);
+  updateWarmingActiveGauges();
+}
+
+// This method is specific to Listener FCDS
+// This method ensures that just the provided list of filter chains are drained
+// Unlike drainFilterChains method, this method would not delete the listener
+// that is holding these filter chains
+void ListenerManagerImpl::startDrainingSequenceForListenerFilterChains(std::string draining_listener,
+    std::list<Network::DrainableFilterChainSharedPtr> filter_chains) {
+  ASSERT(!active_listeners_.empty());
+
+  auto existing_active_listener_it = getListenerByName(active_listeners_, draining_listener);
+
+  if ((existing_active_listener_it == active_listeners_.end()) || 
+      (*existing_active_listener_it == nullptr)) {
+    ENVOY_LOG(error, "fcds: filter chain draining request rejected. Listener not in active state, listener name={}",draining_listener);
+    return;
+  }
+
+  (*existing_active_listener_it)->debugLog("fcds: execute listener filter chain update");
+  ENVOY_LOG(debug, "fcds: filter chain draining request for {} filter chains, accepted for listener name={}",
+            filter_chains.size(), draining_listener);
+
+  ListenerImpl& current_listener = **existing_active_listener_it;
+  std::list<DrainingFilterChainsManager>::iterator draining_group =
+      draining_filter_chains_manager_.emplace(draining_filter_chains_manager_.begin(),
+                                              current_listener, workers_.size());
+  for (Network::DrainableFilterChainSharedPtr fc: filter_chains) {
+    fc->startDraining();
+    draining_group->addFilterChainToDrain(*fc);
+  }
+
+  const auto filter_chain_size = draining_group->numDrainingFilterChains();
+  stats_.total_filter_chains_draining_.add(filter_chain_size);
+
+  // Start the drain sequence which completes when the listener's drain manager has completed
+  // draining at whatever the server configured drain times are.
+  // startDrainingSequence sets up the callback to be executed when drainTime expires.
+  // And the callback in turn goes through all the workers and invokes worker call back to drain the fc connection 
+  draining_group->startDrainSequence(
+      server_.options().drainTime(), server_.dispatcher(), [this, draining_group]() -> void {
+        draining_group->getDrainingListener().debugLog(
+            absl::StrCat("removing draining filter chains from listener ",
+                        draining_group->getDrainingListener().name()));
+        for (const auto& worker : workers_) {
+          // Once the drain time has completed via the drain manager's timer, we tell the workers
+          // to remove the filter chains.
+          worker->removeFilterChains(
+              draining_group->getDrainingListenerTag(), draining_group->getDrainingFilterChains(),
+              [this, draining_group]() -> void {
+                server_.dispatcher().post([this, draining_group]() -> void {
+                  if (draining_group->decWorkersPendingRemoval() == 0) {
+                    draining_group->getDrainingListener().debugLog(
+                        absl::StrCat("draining filter chains from listener ",
+                                    draining_group->getDrainingListener().name(), " complete"));
+                    stats_.total_filter_chains_draining_.sub(
+                        draining_group->numDrainingFilterChains());
+                  }
+                });
+              });
+        }
+      });
+      
   updateWarmingActiveGauges();
 }
 
